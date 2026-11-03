@@ -17,15 +17,20 @@ param(
   [switch]$NoTask                          # do not install/start the logon task
 )
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'   # the PowerShell 5.1 progress bar makes downloads very slow
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $here = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $here
 $state = Join-Path $here '.state'
 $tunnelDir = Join-Path $here 'tunnel'
 function Step($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
 function Done($m) { Write-Host "   OK  $m" -ForegroundColor Green }
+$mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 function Lock-File($path) {
-  # only the current user (and SYSTEM/Administrators) can read the file
-  & icacls.exe $path /inheritance:r /grant:r "${env:USERNAME}:F" '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+  # only the current user (and SYSTEM/Administrators) can read it; folders pass the rule on to everything inside
+  $rule = if ((Get-Item $path).PSIsContainer) { '(OI)(CI)F' } else { 'F' }
+  & icacls.exe $path /inheritance:r /grant:r "*${mySid}:$rule" "*S-1-5-18:$rule" "*S-1-5-32-544:$rule" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "could not restrict permissions on $path" }
 }
 function New-Secret { $b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); ([Convert]::ToBase64String($b)).TrimEnd('=').Replace('+', '-').Replace('/', '_') }
@@ -36,8 +41,12 @@ if (-not $node) { throw 'Node.js is not installed. Install the LTS version from 
 $nodeMajor = [int](((& node --version) -replace '^v') -split '\.')[0]
 if ($nodeMajor -lt 20) { throw "Node.js 20 or newer is needed (found $(& node --version))." }
 Done "Node.js $(& node --version)"
-$bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
-if (Test-Path $bash) { Done "Git Bash $bash" } else { Write-Warning 'Git for Windows not found; the bash shell will not work (PowerShell still will). Install it from https://git-scm.com/download/win' }
+$bashCandidates = @((Join-Path $env:ProgramFiles 'Git\bin\bash.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe'))
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCmd) { $bashCandidates += (Join-Path (Split-Path (Split-Path $gitCmd.Source -Parent) -Parent) 'bin\bash.exe') }
+$bash = $bashCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+if (-not $bash) { throw 'Git for Windows was not found. Install it from https://git-scm.com/download/win, close and reopen PowerShell, then run setup again.' }
+Done "Git Bash $bash"
 
 Step 'Installing dependencies (npm ci)'
 & npm ci --no-audit --no-fund
@@ -73,9 +82,10 @@ if ($DownloadOnly) { Write-Host "`nDownload-only run finished."; exit 0 }
 
 Step 'Creating local secrets'
 New-Item -ItemType Directory -Force -Path $state | Out-Null
+Lock-File $state
 foreach ($name in 'token', 'bridge-key') {
   $f = Join-Path $state $name
-  if ($NewSecrets -or -not (Test-Path $f)) { Set-Content -Path $f -Value (New-Secret) -Encoding ascii -NoNewline; Lock-File $f; Done "created .state\$name" }
+  if ($NewSecrets -or -not (Test-Path $f)) { Set-Content -Path $f -Value (New-Secret) -Encoding ascii -NoNewline; Done "created .state\$name" }
   else { Done ".state\$name kept" }
 }
 $token = (Get-Content (Join-Path $state 'token') -Raw).Trim()
@@ -86,8 +96,11 @@ if (-not $TunnelId -and (Test-Path $profilePath)) {
   $m = Select-String -Path $profilePath -Pattern 'tunnel_id:\s*"?(tunnel_([a-z]{4}_)?[a-z0-9]{32})' | Select-Object -First 1
   if ($m) { $TunnelId = $m.Matches[0].Groups[1].Value; Done "using tunnel ID from the existing profile" }
 }
-while (-not ($TunnelId -match '^tunnel_([a-z]{4}_)?[a-z0-9]{32}$')) {
-  $TunnelId = (Read-Host 'Paste your tunnel ID (platform.openai.com -> Tunnels, starts with tunnel_)').Trim()
+$tries = 0
+while (-not ($TunnelId -match '^tunnel_[A-Za-z0-9_]{8,}$')) {
+  if ($TunnelId) { Write-Warning "'$TunnelId' does not look like a tunnel ID. It starts with tunnel_ (copy it from platform.openai.com -> Tunnels)." }
+  if (++$tries -gt 3) { throw 'No valid tunnel ID entered. Run setup.ps1 again when you have it.' }
+  $TunnelId = (Read-Host 'Paste your tunnel ID (platform.openai.com -> Tunnels, starts with tunnel_)').Trim().Trim('"', "'")
 }
 $keyPath = Join-Path $state 'control-plane-api-key'
 if ($ApiKeyFile) {
@@ -95,11 +108,12 @@ if ($ApiKeyFile) {
 } elseif (Test-Path $keyPath) {
   $apiKey = (Get-Content $keyPath -Raw).Trim(); Done 'tunnel API key kept'
 } else {
-  $sec = Read-Host 'Paste the restricted API key (Tunnels: Read + Use only); input is hidden' -AsSecureString
+  Write-Host '   Paste the restricted API key and press Enter. Nothing appears on screen while you paste - that is normal.'
+  $sec = Read-Host 'API key (Tunnels: Read + Use only)' -AsSecureString
   $apiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)).Trim()
 }
 if (-not ($apiKey -match '^sk-[A-Za-z0-9_-]{20,}$')) { throw 'that does not look like an OpenAI API key (it should start with sk-)' }
-Set-Content -Path $keyPath -Value $apiKey -Encoding ascii -NoNewline; Lock-File $keyPath
+Set-Content -Path $keyPath -Value $apiKey -Encoding ascii -NoNewline
 Done 'API key saved to .state\control-plane-api-key (only your user can read it)'
 
 $yaml = @"
@@ -120,7 +134,7 @@ mcp:
     - channel: main
       url: "http://127.0.0.1:$Port/$token/mcp"
 "@
-Set-Content -Path $profilePath -Value $yaml -Encoding ascii; Lock-File $profilePath
+Set-Content -Path $profilePath -Value $yaml -Encoding ascii
 Done 'wrote .state\tunnel-client.yaml'
 
 Step 'Settings (config.json)'
@@ -129,27 +143,40 @@ $cfg = [ordered]@{}
 if (Test-Path $cfgPath) { (Get-Content $cfgPath -Raw | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $cfg[$_.Name] = $_.Value } }
 $cfg['port'] = $Port
 if ($Mode) { $cfg['mode'] = $Mode } elseif (-not $cfg.Contains('mode')) { $cfg['mode'] = 'full' }
-if ($PSBoundParameters.ContainsKey('Roots')) { $cfg['roots'] = @($Roots | ForEach-Object { (Resolve-Path $_).Path }) } elseif (-not $cfg.Contains('roots')) { $cfg['roots'] = @() }
+if ($PSBoundParameters.ContainsKey('Roots')) {
+  # "-Roots C:\a,D:\b" arrives as one string under -File, so split on , and ;
+  $list = @($Roots | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  foreach ($r in $list) { if (-not (Test-Path $r -PathType Container)) { throw "allowed folder does not exist: $r" } }
+  $cfg['roots'] = @($list | ForEach-Object { (Resolve-Path $_).Path })
+} elseif (-not $cfg.Contains('roots')) { $cfg['roots'] = @() }
 if ($Cwd) { $cfg['cwd'] = (Resolve-Path $Cwd).Path }
-($cfg | ConvertTo-Json) | Set-Content -Path $cfgPath -Encoding utf8
+elseif (@($cfg['roots']).Count -and -not $cfg.Contains('cwd')) { $cfg['cwd'] = @($cfg['roots'])[0] }
+$cfg['bash'] = $bash
+# write without a byte-order mark: Node's JSON.parse rejects one (PowerShell 5.1 '-Encoding utf8' adds it)
+[System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json), $utf8NoBom)
 Done ("mode=$($cfg['mode'])  roots=" + $(if (@($cfg['roots']).Count) { @($cfg['roots']) -join '; ' } else { '(whole PC)' }))
 
 Step 'Self-test (local, temporary port and secrets)'
 & node test.mjs
 if ($LASTEXITCODE -ne 0) { throw 'self-test failed' }
 
-Step 'Checking the tunnel profile with tunnel-client doctor'
-$env:CONTROL_PLANE_API_KEY = $apiKey
-& $exe doctor --config $profilePath
-$doctorCode = $LASTEXITCODE
-Remove-Item Env:\CONTROL_PLANE_API_KEY
-if ($doctorCode -ne 0) { Write-Warning 'doctor reported problems (it may only mean the server is not running yet). The logon task starts both; check .state\tunnel.log if ChatGPT cannot see the tools.' } else { Done 'doctor passed' }
-
 if (-not $NoTask) {
   Step 'Installing the logon task'
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'install-task.ps1') -Port $Port
   if ($LASTEXITCODE -ne 0) { throw 'install-task.ps1 failed' }
+  Step 'Checking that the bridge is running'
+  $ok = $false
+  for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Seconds 1; try { if ((Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 "http://127.0.0.1:$Port/healthz").StatusCode -eq 200) { $ok = $true; break } } catch {} }
+  if ($ok) { Done "server answering on port $Port" } else { Write-Warning "the server did not answer on port $Port. Look at .state\server.log" }
 }
+
+Step 'Checking the tunnel connection with tunnel-client doctor'
+$env:CONTROL_PLANE_API_KEY = $apiKey
+& $exe doctor --config $profilePath
+$doctorCode = $LASTEXITCODE
+Remove-Item Env:\CONTROL_PLANE_API_KEY
+if ($doctorCode -ne 0) { Write-Warning 'tunnel-client doctor reported a problem; check the lines above.' } else { Done 'doctor passed' }
+
 
 Write-Host @"
 

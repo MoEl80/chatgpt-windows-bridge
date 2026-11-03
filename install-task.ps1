@@ -7,14 +7,23 @@ param(
   [int]$Port = 8797
 )
 $ErrorActionPreference = "Stop"
-if ($Remove) {
+$here = Split-Path -Parent $MyInvocation.MyCommand.Definition
+function Stop-Bridge {
+  # Stop-ScheduledTask alone leaves cmd -> node -> tunnel-client running, so kill that tree too
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  $logPattern = [regex]::Escape((Join-Path $here '.state\server.log'))
+  Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" | Where-Object { $_.CommandLine -match $logPattern } |
+    ForEach-Object { & taskkill /PID $_.ProcessId /T /F | Out-Null }
+  Start-Sleep -Seconds 1
+}
+if ($Remove) {
+  Stop-Bridge
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-  Write-Host "Removed task '$TaskName'."
+  Remove-Item (Join-Path $here 'run-server.vbs') -ErrorAction SilentlyContinue
+  Write-Host "Stopped and removed '$TaskName'. You can now delete this folder."
   exit 0
 }
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $nodeExe = (Get-Command node -ErrorAction Stop).Source
 $vbsPath = Join-Path $here "run-server.vbs"
 $logPath = Join-Path $here ".state\server.log"
@@ -29,7 +38,8 @@ $vbs = @(
   "rc = sh.Run(""cmd /c """"""""$nodeExe"""" start.mjs >> """"$logPath"""" 2>&1"""""", 0, True)",
   "WScript.Quit rc"
 )
-[System.IO.File]::WriteAllText($vbsPath, ($vbs -join "`r`n") + "`r`n")
+# UTF-16 with BOM: Windows Script Host reads BOM-less files as ANSI and breaks non-English folder names
+[System.IO.File]::WriteAllText($vbsPath, ($vbs -join "`r`n") + "`r`n", [System.Text.Encoding]::Unicode)
 
 $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "`"$vbsPath`"" -WorkingDirectory $here
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -37,5 +47,6 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
   -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
   -Description "ChatGPT Windows Bridge: MCP server + OpenAI tunnel-client ($here)" -Force | Out-Null
+Stop-Bridge   # a running copy would keep old settings (the task ignores a second start)
 Start-ScheduledTask -TaskName $TaskName
 Write-Host "Task '$TaskName' registered and started (node $nodeExe, port $Port)."

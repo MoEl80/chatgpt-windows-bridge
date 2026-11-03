@@ -13,7 +13,15 @@ setTimeout(() => { console.error('FAIL: test timed out after 120 s'); process.ex
 let url = process.argv[2];
 let httpServer;
 if (!url) {
-  const { startHttp, toWinPath, insideRoots, loadConfig } = await import('./server.mjs');
+  const { startHttp, toWinPath, insideRoots, loadConfig, readConfigFile, isBridgeSecret } = await import('./server.mjs');
+  // settings written by Windows PowerShell 5.1 may start with a byte-order mark
+  const bomFile = path.join(os.tmpdir(), `cgb-bom-${Date.now()}.json`);
+  fs.writeFileSync(bomFile, '\uFEFF{"mode":"read"}');
+  assert.equal(readConfigFile(bomFile).mode, 'read'); fs.rmSync(bomFile);
+  // the default folder moves inside the allowed folders
+  assert.equal(loadConfig({ roots: ['C:\\Work'], cwd: 'C:\\Users\\x' }).cwd, 'C:\\Work');
+  assert.ok(isBridgeSecret(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '.state', 'token')));
+  console.log('PASS BOM settings file, default folder inside roots, own secrets recognised');
   assert.equal(toWinPath('/c/Work/x y/z.md'), 'C:\\Work\\x y\\z.md');
   assert.equal(toWinPath('rel\\a.txt', 'C:\\Work'), 'C:\\Work\\rel\\a.txt');
   assert.ok(insideRoots('C:\\Work\\a.txt', ['C:\\Work']) && !insideRoots('C:\\Workshop\\a.txt', ['C:\\Work']) && insideRoots('D:\\x', []));
@@ -72,6 +80,12 @@ assert.ok(Buffer.from(text(r).split('--- base64 ---\n')[1], 'base64').equals(bin
 r = await call('list_dir', { path: dir });
 assert.match(text(r), /f a b\.txt/);
 console.log('PASS write/read/edit (CRLF) / stale-sha refusal / 70000-byte binary roundtrip / list_dir');
+if (httpServer) {
+  const own = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '.state', 'token');
+  r = await call('read_file', { path: own });
+  assert.ok(r.isError && /secret files/.test(text(r)), 'own secrets must be refused: ' + text(r));
+  console.log('PASS the bridge refuses to read its own .state secrets');
+}
 
 r = await call('run', { command: 'echo start; sleep 4; echo end', wait_sec: 1 });
 assert.match(text(r), /STILL RUNNING/);

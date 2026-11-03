@@ -1,0 +1,16 @@
+{
+  "name": "chatgpt-windows-bridge",
+  "version": "1.0.0",
+  "description": "Let a ChatGPT chat run commands and edit files on your Windows PC through OpenAI's Secure MCP Tunnel",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node start.mjs",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}

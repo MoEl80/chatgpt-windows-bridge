@@ -1,6 +1,6 @@
 {
   "port": 8797,
-  "mode": "full",
+  "mode": "read",
   "roots": ["C:\\Users\\me\\Projects"],
   "cwd": "C:\\Users\\me\\Projects"
 }

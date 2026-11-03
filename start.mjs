@@ -12,7 +12,15 @@ const STATE = path.join(HERE, '.state');
 const EXE = path.join(HERE, 'tunnel', 'tunnel-client.exe');
 const KEY_FILE = path.join(STATE, 'control-plane-api-key');
 const PROFILE = path.join(STATE, 'tunnel-client.yaml'); // holds tunnel_id + local MCP URL (secret path)
+const BRIDGE_KEY = path.join(STATE, 'bridge-key');
+const TOKEN_FILE = path.join(STATE, 'token');
 const log = (m) => console.log(`${new Date().toISOString()} ${m}`);
+
+const missingAtStart = [EXE, KEY_FILE, PROFILE, BRIDGE_KEY, TOKEN_FILE].find((f) => !fs.existsSync(f));
+if (missingAtStart) {
+  log(`FATAL: required bridge file is missing: ${missingAtStart}. Run setup.ps1 to repair the installation.`);
+  process.exit(1);
+}
 
 try {
   const srv = await startHttp();
@@ -26,24 +34,29 @@ try {
 
 let child = null;
 let stopping = false;
-const stop = () => { stopping = true; try { if (child) spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }); } catch {} setTimeout(() => process.exit(0), 500); };
+const stop = () => {
+  stopping = true;
+  try { if (child) spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }); } catch {}
+  setTimeout(() => process.exit(0), 500);
+};
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
 
 function runTunnel(attempt = 0) {
   if (stopping) return;
-  const missing = [EXE, KEY_FILE, PROFILE].find((f) => !fs.existsSync(f));
-  if (missing) { log(`tunnel not started: missing ${missing} (run setup.ps1)`); return; }
+  const missing = [EXE, KEY_FILE, PROFILE, BRIDGE_KEY, TOKEN_FILE].find((f) => !fs.existsSync(f));
+  if (missing) {
+    log(`FATAL: required bridge file disappeared: ${missing}. Exiting so the logon task can retry; run setup.ps1 if it does not recover.`);
+    process.exit(1);
+  }
   const key = fs.readFileSync(KEY_FILE, 'utf8').trim();
   const out = fs.openSync(path.join(STATE, 'tunnel.log'), 'a');
-  const args = ['run', '--config', PROFILE];
-  const bridgeKey = path.join(STATE, 'bridge-key');
-  // tunnel-client adds this header to every request it forwards; server.mjs refuses requests without it
-  if (fs.existsSync(bridgeKey)) args.push('--mcp.extra-headers', `X-Bridge-Key: file:${bridgeKey.replace(/\\/g, '/')}`);
+  const args = ['run', '--config', PROFILE, '--mcp.extra-headers', `X-Bridge-Key: file:${BRIDGE_KEY.replace(/\\/g, '/')}`];
   const started = Date.now();
   let restarted = false;
   const again = (why) => {
-    if (restarted) return; restarted = true;
+    if (restarted || stopping) return;
+    restarted = true;
     try { fs.closeSync(out); } catch {}
     const ranFor = Date.now() - started;
     const next = ranFor > 60_000 ? 0 : attempt + 1;

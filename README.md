@@ -90,9 +90,9 @@ ChatGPT offers two choices for a custom MCP server: **OAuth** or **No authentica
 | **Your choice of power.** `-Mode read` (no shell, no writes) and `-Roots` (allowed folders). | Mistakes. Note that in full mode `run` can still reach any folder, because a shell can. |
 | **ChatGPT's confirmation.** ChatGPT asks before tool calls unless you pick "Always allow". | Surprise actions. |
 
-So "No authentication" in ChatGPT does **not** mean anyone can use it. It means **anyone who can use your ChatGPT account** can. Two real risks remain:
+So "No authentication" in ChatGPT does **not** mean anyone can use it. It works only for **you, signed in to your own ChatGPT account**, on any of your devices: web, phone app or phone browser. Two real risks remain:
 
-- **Your ChatGPT account.** Protect it with 2FA. If you share your workspace, everyone in it can see your tunnel.
+- **Your ChatGPT sign-in.** Every device where you are signed in to ChatGPT can use the plugin. Turn on 2FA, and sign out of any device you no longer use.
 - **Prompt injection.** If ChatGPT reads a hostile web page or file in the same chat, hidden text could try to make it call these tools. Keep the plugin out of chats where you browse untrusted content, consider `-Mode read`, and watch what it runs.
 
 **To cut it off instantly:** delete the tunnel or its key on platform.openai.com, or uninstall the plugin in ChatGPT. Locally, run `install-task.ps1 -Remove`.

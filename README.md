@@ -1,6 +1,6 @@
 # ChatGPT Windows Bridge
 
-**Use ChatGPT to run commands and edit files on your Windows PC through OpenAI's Secure MCP Tunnel.**
+**Let a normal ChatGPT conversation run commands and work with files on your own Windows PC through OpenAI's Secure MCP Tunnel.**
 
 You type in a ChatGPT chat, for example *"run my backup script"* or *"fix the typo in notes.txt"*, and the installed plugin can do it on your PC.
 
